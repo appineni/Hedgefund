@@ -7,6 +7,18 @@ from tradingagents.default_config import DEFAULT_CONFIG
 # editing this script. Override individual keys here only when you
 # want a hard-coded value that should ignore the environment.
 config = DEFAULT_CONFIG.copy()
+config["llm_provider"] = "anthropic"
+config["deep_think_llm"] = "claude-sonnet-4-6"
+config["quick_think_llm"] = "claude-sonnet-4-6"
+config["max_debate_rounds"] = 1  # Increase debate rounds
+
+# Configure data vendors (default uses yfinance, no extra API keys needed)
+config["data_vendors"] = {
+    "core_stock_apis": "yfinance",           # Options: alpha_vantage, yfinance
+    "technical_indicators": "yfinance",      # Options: alpha_vantage, yfinance
+    "fundamental_data": "yfinance",          # Options: alpha_vantage, yfinance
+    "news_data": "yfinance",                 # Options: alpha_vantage, yfinance
+}
 
 # Initialize with custom config
 ta = TradingAgentsGraph(debug=True, config=config)
