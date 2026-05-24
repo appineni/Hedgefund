@@ -96,3 +96,11 @@ def test_unknown_env_var_is_ignored(monkeypatch):
         TRADINGAGENTS_NONEXISTENT_KEY="oops",
     )
     assert "nonexistent_key" not in dc.DEFAULT_CONFIG
+
+
+def test_reports_dir_env_override(monkeypatch, tmp_path):
+    dc = _reload_with_env(
+        monkeypatch,
+        TRADINGAGENTS_REPORTS_DIR=str(tmp_path / "custom-reports"),
+    )
+    assert dc.DEFAULT_CONFIG["reports_dir"] == str(tmp_path / "custom-reports")

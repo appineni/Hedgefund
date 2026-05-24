@@ -17,7 +17,21 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_RISK_ROUNDS":      "max_risk_discuss_rounds",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
+    "TRADINGAGENTS_REPORTS_DIR":          "reports_dir",
 }
+
+
+def _default_reports_dir() -> str:
+    """Default folder for saved analysis reports.
+
+    Prefers ~/iCloudDrive/reports when iCloud Drive is installed (syncs to
+    https://www.icloud.com/iclouddrive/042BOQxwpPs8KKgO161kdQpwg#reports).
+    Override with TRADINGAGENTS_REPORTS_DIR in .env.
+    """
+    icloud_root = os.path.join(os.path.expanduser("~"), "iCloudDrive")
+    if os.path.isdir(icloud_root):
+        return os.path.join(icloud_root, "reports")
+    return os.path.join(os.getcwd(), "reports")
 
 
 def _coerce(value: str, reference):
@@ -44,6 +58,7 @@ def _apply_env_overrides(config: dict) -> dict:
 DEFAULT_CONFIG = _apply_env_overrides({
     "project_dir": os.path.abspath(os.path.join(os.path.dirname(__file__), ".")),
     "results_dir": os.getenv("TRADINGAGENTS_RESULTS_DIR", os.path.join(_TRADINGAGENTS_HOME, "logs")),
+    "reports_dir": _default_reports_dir(),
     "data_cache_dir": os.getenv("TRADINGAGENTS_CACHE_DIR", os.path.join(_TRADINGAGENTS_HOME, "cache")),
     "memory_log_path": os.getenv("TRADINGAGENTS_MEMORY_LOG_PATH", os.path.join(_TRADINGAGENTS_HOME, "memory", "trading_memory.md")),
     # Optional cap on the number of resolved memory log entries. When set,
