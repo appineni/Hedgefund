@@ -7,9 +7,9 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 # editing this script. Override individual keys here only when you
 # want a hard-coded value that should ignore the environment.
 config = DEFAULT_CONFIG.copy()
-config["llm_provider"] = "anthropic"
-config["deep_think_llm"] = "claude-sonnet-4-6"
-config["quick_think_llm"] = "claude-sonnet-4-6"
+# config["llm_provider"] = "anthropic"
+# config["deep_think_llm"] = "claude-sonnet-4-6"
+# config["quick_think_llm"] = "claude-sonnet-4-6"
 config["max_debate_rounds"] = 1  # Increase debate rounds
 
 # Configure data vendors (default uses yfinance, no extra API keys needed)

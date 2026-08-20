@@ -244,3 +244,33 @@ class TestTickerAliases:
 
         assert captured["queries"] == ["Nifty 50 OR NSEI OR NIFTY50"]
         assert captured["subs"] == ["IndiaInvestments"]
+
+
+@pytest.mark.unit
+class TestRedditRateLimitHandling:
+    def test_first_sub_rate_limited_returns_rate_limit_notice(self):
+        # First sub is rate limited, no posts at all
+        with patch.object(reddit, "_fetch_subreddit", return_value=([], True)):
+            out = reddit.fetch_reddit_posts("NVDA", subreddits=("stocks", "wallstreetbets"), inter_request_delay=0)
+        assert "rate-limited" in out
+        assert "r/stocks: <reddit rate-limited" in out
+        assert "no posts found mentioning" not in out
+        assert "across r/stocks" not in out
+
+    def test_subsequent_sub_rate_limited_includes_both_posts_and_notice(self):
+        # First sub has posts, second sub is rate-limited
+        posts = [{
+            "title": "NVDA pops", "score": 100, "num_comments": 10,
+            "created_utc": reddit._iso_to_timestamp("2026-05-20T14:30:00Z"),
+            "selftext": "great", "source": "rss"
+        }]
+        def fake_fetch(query, sub, limit, timeout, *, display_ticker=None):
+            if sub == "stocks":
+                return posts, False
+            return [], True
+
+        with patch.object(reddit, "_fetch_subreddit", side_effect=fake_fetch):
+            out = reddit.fetch_reddit_posts("NVDA", subreddits=("stocks", "wallstreetbets"), inter_request_delay=0)
+        assert "NVDA pops" in out
+        assert "r/wallstreetbets: <reddit rate-limited" in out
+

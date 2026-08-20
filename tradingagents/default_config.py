@@ -36,8 +36,7 @@ _BOOL_FALSE = ("false", "0", "no", "off")
 def _default_reports_dir() -> str:
     """Default folder for saved analysis reports.
 
-    Prefers ~/iCloudDrive/reports when iCloud Drive is installed (syncs to
-    https://www.icloud.com/iclouddrive/042BOQxwpPs8KKgO161kdQpwg#reports).
+    Prefers ~/iCloudDrive/reports when iCloud Drive is installed.
     Override with TRADINGAGENTS_REPORTS_DIR in .env.
     """
     icloud_root = os.path.join(os.path.expanduser("~"), "iCloudDrive")

@@ -293,6 +293,7 @@ def fetch_reddit_posts(
     subreddit_list = tuple(subreddits)
     blocks = []
     total_posts = 0
+    was_rate_limited = False
     for i, sub in enumerate(subreddit_list):
         if i > 0:
             time.sleep(inter_request_delay)
@@ -307,6 +308,7 @@ def fetch_reddit_posts(
             blocks.append(
                 f"r/{sub}: <reddit rate-limited (HTTP 429); skipping remaining subreddits>"
             )
+            was_rate_limited = True
             break
         total_posts += len(posts)
         if not posts:
@@ -339,7 +341,7 @@ def fetch_reddit_posts(
             )
         blocks.append("\n".join(lines))
 
-    if total_posts == 0:
+    if total_posts == 0 and not was_rate_limited:
         return (
             f"<no Reddit posts found mentioning {ticker.upper()} across "
             f"{', '.join(f'r/{s}' for s in subreddit_list)} in the past 7 days>"

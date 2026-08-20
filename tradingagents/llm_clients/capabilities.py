@@ -82,6 +82,15 @@ _MINIMAX_THINKING = ModelCapabilities(
     requires_reasoning_split=True,
 )
 
+# Kimi (Moonshot AI) models (e.g. kimi-k3, kimi-k2.6, etc.) have thinking enabled,
+# which makes them incompatible with forced/specified tool_choice.
+_KIMI_THINKING = ModelCapabilities(
+    supports_tool_choice=False,
+    supports_json_mode=True,
+    supports_json_schema=True,
+    preferred_structured_method="function_calling",
+)
+
 _DEFAULT = ModelCapabilities(
     supports_tool_choice=True,
     supports_json_mode=True,
@@ -113,6 +122,7 @@ _BY_PATTERN: list[tuple[re.Pattern[str], ModelCapabilities]] = [
     (re.compile(r"^deepseek-v\d"), _DEEPSEEK_THINKING),
     (re.compile(r"^deepseek-reasoner"), _DEEPSEEK_THINKING),
     (re.compile(r"^MiniMax-M\d"), _MINIMAX_THINKING),
+    (re.compile(r"^kimi-"), _KIMI_THINKING),
 ]
 
 
