@@ -45,7 +45,6 @@ class TestStockTwitsResilience:
         assert "unavailable" in out.lower()
         assert out.startswith("<stocktwits unavailable")
 
-
 @pytest.mark.unit
 class TestStockTwitsCryptoSymbols:
     @pytest.mark.parametrize(
@@ -75,3 +74,29 @@ class TestStockTwitsCryptoSymbols:
         with patch.object(stocktwits, "urlopen", side_effect=fake_urlopen):
             stocktwits.fetch_stocktwits_messages("BTC-USD")
         assert "/symbol/BTC.X.json" in seen["url"]
+
+
+@pytest.mark.unit
+class TestStockTwitsTickerAliases:
+    def test_nsei_resolves_to_nifty50_nse(self):
+        captured = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return b'{"messages": []}'
+
+        def _urlopen(req, timeout=10.0):
+            captured["url"] = req.full_url
+            return _Resp()
+
+        with patch.object(stocktwits, "urlopen", side_effect=_urlopen):
+            out = stocktwits.fetch_stocktwits_messages("^NSEI")
+
+        assert "NIFTY50.NSE" in captured["url"]
+        assert "no StockTwits messages found for $NIFTY50.NSE" in out

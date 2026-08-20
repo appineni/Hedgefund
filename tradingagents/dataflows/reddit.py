@@ -48,10 +48,58 @@ _ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 # investing trend more measured. Caller can override.
 DEFAULT_SUBREDDITS = ("wallstreetbets", "stocks", "investing")
 
+# Yahoo/index tickers mapped to Reddit search terms users actually post.
+_REDDIT_SEARCH_ALIASES = {
+    "^NSEI": "Nifty 50 OR NSEI OR NIFTY50",
+    "NSEI": "Nifty 50 OR NSEI OR NIFTY50",
+    "NIFTY50.NSE": "Nifty 50 OR NSEI OR NIFTY50",
+}
 
-def _search_qs(ticker: str, limit: int) -> str:
+# Index / regional tickers that are better served by local finance subreddits
+# than the US-default set — also cuts request volume for low-signal US subs.
+_TICKER_SUBREDDITS: dict[str, tuple[str, ...]] = {
+    "^NSEI": ("IndiaInvestments",),
+    "NSEI": ("IndiaInvestments",),
+    "NIFTY50.NSE": ("IndiaInvestments",),
+}
+
+# Pacing and 429 retry policy for Reddit's per-IP rate limit.
+_DEFAULT_INTER_REQUEST_DELAY = 4.0
+_MIN_SECONDS_BETWEEN_REQUESTS = 4.0
+_MAX_429_RETRIES = 2  # initial attempt + up to two retries
+_DEFAULT_429_BACKOFF = 8.0
+_last_reddit_request_at = 0.0
+
+
+def _resolve_reddit_search_query(ticker: str) -> str:
+    """Map a market ticker to a Reddit search query."""
+    normalized = ticker.strip().upper()
+    return _REDDIT_SEARCH_ALIASES.get(normalized, ticker)
+
+
+def _subreddits_for_ticker(ticker: str) -> tuple[str, ...]:
+    """Pick subreddits with the best signal density for ``ticker``."""
+    normalized = ticker.strip().upper()
+    if normalized in _TICKER_SUBREDDITS:
+        return _TICKER_SUBREDDITS[normalized]
+    if normalized.endswith(".NS"):
+        return ("IndiaInvestments", "IndianStreetBets")
+    return DEFAULT_SUBREDDITS
+
+
+def _pace_reddit_request() -> None:
+    """Enforce a minimum gap between Reddit HTTP calls (process-wide)."""
+    global _last_reddit_request_at
+    now = time.monotonic()
+    wait = _MIN_SECONDS_BETWEEN_REQUESTS - (now - _last_reddit_request_at)
+    if wait > 0:
+        time.sleep(wait)
+    _last_reddit_request_at = time.monotonic()
+
+
+def _search_qs(query: str, limit: int) -> str:
     return urlencode({
-        "q": ticker,
+        "q": query,
         "restrict_sr": "on",
         "sort": "new",
         "t": "week",  # last 7 days
@@ -82,49 +130,65 @@ def _strip_html(content: str) -> str:
 
 
 def _retry_after_seconds(exc: HTTPError) -> float | None:
-    """Seconds to wait from a 429's ``Retry-After`` header, capped at 30s."""
+    """Seconds to wait from a 429's ``Retry-After`` header, capped at 60s."""
     try:
         val = exc.headers.get("Retry-After") if getattr(exc, "headers", None) else None
-        return min(float(val), 30.0) if val else None
+        return min(float(val), 60.0) if val else None
     except (ValueError, TypeError, AttributeError):
         return None
 
 
 def _fetch_subreddit_rss(
-    ticker: str,
+    search_query: str,
     sub: str,
     limit: int,
     timeout: float,
-    _retry: bool = True,
-) -> list[dict]:
+    *,
+    display_ticker: str | None = None,
+    _attempt: int = 0,
+) -> tuple[list[dict], bool]:
     """Default path: parse the public Atom search feed for a subreddit.
 
     Carries no score / comment counts, so those fields are left None and the
     post is tagged ``source="rss"`` for honest display. On a 429 (Reddit's
-    per-IP rate limit) we back off once — honouring ``Retry-After`` when
-    present — before giving up, so a transient burst doesn't blank the feed.
+    per-IP rate limit) we back off with exponential delay — honouring
+    ``Retry-After`` when present — before giving up, so a transient burst
+    doesn't blank the feed.
     """
-    url = _RSS.format(sub=sub, qs=_search_qs(ticker, limit))
+    label = display_ticker or search_query
+    url = _RSS.format(sub=sub, qs=_search_qs(search_query, limit))
     req = Request(url, headers={"User-Agent": _UA})
     try:
+        _pace_reddit_request()
         with urlopen(req, timeout=timeout) as resp:
             root = ET.fromstring(resp.read())
     except HTTPError as exc:
-        if exc.code == 429 and _retry:
-            wait = _retry_after_seconds(exc) or 5.0
+        if exc.code == 429 and _attempt < _MAX_429_RETRIES:
+            wait = _retry_after_seconds(exc) or (_DEFAULT_429_BACKOFF * (2 ** _attempt))
             logger.warning(
-                "Reddit RSS 429 for r/%s · %s — backing off %.1fs then retrying once",
-                sub, ticker, wait,
+                "Reddit RSS 429 for r/%s · %s — backing off %.1fs then retrying (%d/%d)",
+                sub,
+                label,
+                wait,
+                _attempt + 1,
+                _MAX_429_RETRIES,
             )
             time.sleep(wait)
-            return _fetch_subreddit_rss(ticker, sub, limit, timeout, _retry=False)
-        logger.warning("Reddit RSS fetch failed for r/%s · %s: %s", sub, ticker, exc)
-        return []
+            return _fetch_subreddit_rss(
+                search_query,
+                sub,
+                limit,
+                timeout,
+                display_ticker=label,
+                _attempt=_attempt + 1,
+            )
+        logger.warning("Reddit RSS fetch failed for r/%s · %s: %s", sub, label, exc)
+        return [], exc.code == 429
     except (OSError, http.client.HTTPException, ET.ParseError) as exc:
         # OSError covers URLError/TimeoutError/connection resets; HTTPException
         # covers chunked-transfer errors (IncompleteRead/BadStatusLine, #1024).
-        logger.warning("Reddit RSS fetch failed for r/%s · %s: %s", sub, ticker, exc)
-        return []
+        logger.warning("Reddit RSS fetch failed for r/%s · %s: %s", sub, label, exc)
+        return [], False
 
     posts = []
     for entry in root.findall("atom:entry", _ATOM_NS)[:limit]:
@@ -141,15 +205,17 @@ def _fetch_subreddit_rss(
             "selftext": _strip_html(content_el.text if content_el is not None else ""),
             "source": "rss",
         })
-    return posts
+    return posts, False
 
 
 def _fetch_subreddit_json(
-    ticker: str,
+    search_query: str,
     sub: str,
     limit: int,
     timeout: float,
-) -> list[dict]:
+    *,
+    display_ticker: str | None = None,
+) -> tuple[list[dict], bool]:
     """Richer JSON search path (carries score / comment counts).
 
     Reddit's WAF currently returns ``403 Blocked`` on this endpoint for
@@ -158,42 +224,58 @@ def _fetch_subreddit_json(
     triggered 429s on the RSS fallback. Kept for the day the WAF relaxes or an
     OAuth token is wired in; degrades to RSS on failure.
     """
-    url = _API.format(sub=sub, qs=_search_qs(ticker, limit))
+    url = _API.format(sub=sub, qs=_search_qs(search_query, limit))
     req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
+    label = display_ticker or search_query
     try:
+        _pace_reddit_request()
         with urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read())
         children = (payload.get("data") or {}).get("children") or []
-        return [c.get("data", {}) for c in children if isinstance(c, dict)]
+        return [c.get("data", {}) for c in children if isinstance(c, dict)], False
     except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
         logger.warning(
             "Reddit JSON fetch failed for r/%s · %s: %s — falling back to RSS feed.",
-            sub, ticker, exc,
+            sub, label, exc,
         )
-        return _fetch_subreddit_rss(ticker, sub, limit, timeout)
+        return _fetch_subreddit_rss(
+            search_query,
+            sub,
+            limit,
+            timeout,
+            display_ticker=label,
+        )
 
 
 def _fetch_subreddit(
-    ticker: str,
+    search_query: str,
     sub: str,
     limit: int,
     timeout: float,
-) -> list[dict]:
+    *,
+    display_ticker: str | None = None,
+) -> tuple[list[dict], bool]:
     """Fetch one subreddit, RSS-first.
 
     The JSON search endpoint is reliably WAF-blocked (403) for public clients,
     so we go straight to the RSS feed — which serves our identified User-Agent
     reliably — halving our request volume against Reddit's per-IP rate limit.
     """
-    return _fetch_subreddit_rss(ticker, sub, limit, timeout)
+    return _fetch_subreddit_rss(
+        search_query,
+        sub,
+        limit,
+        timeout,
+        display_ticker=display_ticker,
+    )
 
 
 def fetch_reddit_posts(
     ticker: str,
-    subreddits: Iterable[str] = DEFAULT_SUBREDDITS,
+    subreddits: Iterable[str] | None = None,
     limit_per_sub: int = 5,
     timeout: float = 10.0,
-    inter_request_delay: float = 1.0,
+    inter_request_delay: float = _DEFAULT_INTER_REQUEST_DELAY,
 ) -> str:
     """Fetch recent Reddit posts mentioning ``ticker`` across finance
     subreddits and return them as a formatted plaintext block.
@@ -205,12 +287,27 @@ def fetch_reddit_posts(
     # Crypto reaches us as a Yahoo pair (BTC-USD); search Reddit for the base
     # ("BTC") so the query actually matches discussion instead of near-nothing.
     ticker = crypto_base(ticker) or ticker
+    search_query = _resolve_reddit_search_query(ticker)
+    if subreddits is None:
+        subreddits = _subreddits_for_ticker(ticker)
+    subreddit_list = tuple(subreddits)
     blocks = []
     total_posts = 0
-    for i, sub in enumerate(subreddits):
+    for i, sub in enumerate(subreddit_list):
         if i > 0:
             time.sleep(inter_request_delay)
-        posts = _fetch_subreddit(ticker, sub, limit_per_sub, timeout)
+        posts, rate_limited = _fetch_subreddit(
+            search_query,
+            sub,
+            limit_per_sub,
+            timeout,
+            display_ticker=ticker,
+        )
+        if rate_limited:
+            blocks.append(
+                f"r/{sub}: <reddit rate-limited (HTTP 429); skipping remaining subreddits>"
+            )
+            break
         total_posts += len(posts)
         if not posts:
             blocks.append(f"r/{sub}: <no posts found mentioning {ticker.upper()} in the past 7 days>")
@@ -245,6 +342,6 @@ def fetch_reddit_posts(
     if total_posts == 0:
         return (
             f"<no Reddit posts found mentioning {ticker.upper()} across "
-            f"{', '.join(f'r/{s}' for s in subreddits)} in the past 7 days>"
+            f"{', '.join(f'r/{s}' for s in subreddit_list)} in the past 7 days>"
         )
     return "\n\n".join(blocks)

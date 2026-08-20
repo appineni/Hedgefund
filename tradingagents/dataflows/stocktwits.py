@@ -26,16 +26,29 @@ logger = logging.getLogger(__name__)
 _API = "https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
 _UA = "tradingagents/0.2 (+https://github.com/TauricResearch/TradingAgents)"
 
+# Yahoo/index tickers that StockTwits indexes under a different symbol.
+_STOCKTWITS_SYMBOL_ALIASES = {
+    "^NSEI": "NIFTY50.NSE",
+}
+
+
+def _resolve_stocktwits_symbol(ticker: str) -> str:
+    """Map a market ticker to the StockTwits stream symbol."""
+    normalized = ticker.strip().upper()
+    return _STOCKTWITS_SYMBOL_ALIASES.get(normalized, normalized)
+
 
 def _stocktwits_symbol(ticker: str) -> str:
-    """Map a crypto pair to StockTwits' ``<BASE>.X`` convention.
+    """Map a crypto pair to StockTwits' ``<BASE>.X`` convention or resolve aliases.
 
     StockTwits lists crypto as ``BTC.X`` (Yahoo's ``BTC-USD`` form 404s), so any
-    crypto symbol resolves to its base plus ``.X``; other symbols pass through
-    upper-cased.
+    crypto symbol resolves to its base plus ``.X``; other symbols are mapped through
+    _resolve_stocktwits_symbol.
     """
     base = crypto_base(ticker)
-    return f"{base}.X" if base else ticker.strip().upper()
+    if base:
+        return f"{base}.X"
+    return _resolve_stocktwits_symbol(ticker)
 
 
 def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.0) -> str:
@@ -46,7 +59,8 @@ def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.
     symbol has no messages, or the response shape is unexpected — the
     caller never has to special-case None or exceptions.
     """
-    url = _API.format(ticker=_stocktwits_symbol(ticker))
+    symbol = _stocktwits_symbol(ticker)
+    url = _API.format(ticker=symbol)
     req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
     try:
         with urlopen(req, timeout=timeout) as resp:
@@ -54,12 +68,20 @@ def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.
     except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
         # OSError covers URLError/TimeoutError/connection resets; HTTPException
         # covers chunked-transfer errors (IncompleteRead/BadStatusLine, #1024).
-        logger.warning("StockTwits fetch failed for %s: %s", ticker, exc)
+        if symbol != ticker.strip().upper():
+            logger.warning(
+                "StockTwits fetch failed for %s (resolved to %s): %s",
+                ticker,
+                symbol,
+                exc,
+            )
+        else:
+            logger.warning("StockTwits fetch failed for %s: %s", ticker, exc)
         return f"<stocktwits unavailable: {type(exc).__name__}>"
 
     messages = data.get("messages", []) if isinstance(data, dict) else []
     if not messages:
-        return f"<no StockTwits messages found for ${ticker.upper()}>"
+        return f"<no StockTwits messages found for ${symbol}>"
 
     lines = []
     bullish = bearish = unlabeled = 0

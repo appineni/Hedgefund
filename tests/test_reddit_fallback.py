@@ -75,8 +75,10 @@ class TestStripHtml:
 @pytest.mark.unit
 class TestRssParsing:
     def test_parses_atom_entries(self):
-        with patch.object(reddit, "urlopen", return_value=_atom_resp()):
-            posts = reddit._fetch_subreddit_rss("NVDA", "stocks", limit=5, timeout=5.0)
+        with patch.object(reddit, "urlopen", return_value=_atom_resp()), \
+             patch.object(reddit, "_pace_reddit_request"):
+            posts, rate_limited = reddit._fetch_subreddit_rss("NVDA", "stocks", limit=5, timeout=5.0)
+        assert not rate_limited
         assert len(posts) == 2
         assert posts[0]["title"] == "NVDA earnings beat, stock pops"
         assert posts[0]["source"] == "rss"
@@ -86,8 +88,11 @@ class TestRssParsing:
         assert "datacenter unit" in posts[0]["selftext"]
 
     def test_malformed_xml_fails_open(self):
-        with patch.object(reddit, "urlopen", return_value=_resp(lambda: b"<<not xml>>")):
-            assert reddit._fetch_subreddit_rss("NVDA", "stocks", 5, 5.0) == []
+        with patch.object(reddit, "urlopen", return_value=_resp(lambda: b"<<not xml>>")), \
+             patch.object(reddit, "_pace_reddit_request"):
+            posts, rate_limited = reddit._fetch_subreddit_rss("NVDA", "stocks", 5, 5.0)
+        assert posts == []
+        assert not rate_limited
 
 
 @pytest.mark.unit
@@ -96,14 +101,15 @@ class TestFetchSubredditIsRssFirst:
     the WAF-blocked JSON endpoint, which only burned rate-limit budget."""
 
     def test_delegates_to_rss_without_touching_json(self):
-        sentinel = [{"title": "x", "source": "rss", "score": None,
-                     "num_comments": None, "created_utc": None, "selftext": ""}]
+        sentinel = ([{"title": "x", "source": "rss", "score": None,
+                     "num_comments": None, "created_utc": None, "selftext": ""}], False)
         with patch.object(reddit, "_fetch_subreddit_rss", return_value=sentinel) as rss, \
              patch.object(reddit, "urlopen",
                           side_effect=AssertionError("JSON endpoint must not be called")):
-            out = reddit._fetch_subreddit("NVDA", "stocks", 5, 5.0)
+            out, rate_limited = reddit._fetch_subreddit("NVDA", "stocks", 5, 5.0)
         rss.assert_called_once()
-        assert out is sentinel
+        assert out is sentinel[0]
+        assert not rate_limited
 
 
 @pytest.mark.unit
@@ -112,13 +118,14 @@ class TestJsonPathFallsBackToRss:
 
     def test_403_triggers_rss(self):
         err = HTTPError("url", 403, "Blocked", {}, None)
-        rss_posts = [{"title": "x", "source": "rss", "score": None,
-                      "num_comments": None, "created_utc": None, "selftext": ""}]
+        rss_posts = ([{"title": "x", "source": "rss", "score": None,
+                      "num_comments": None, "created_utc": None, "selftext": ""}], False)
         with patch.object(reddit, "urlopen", side_effect=err), \
              patch.object(reddit, "_fetch_subreddit_rss", return_value=rss_posts) as rss:
-            out = reddit._fetch_subreddit_json("NVDA", "stocks", 5, 5.0)
+            out, rate_limited = reddit._fetch_subreddit_json("NVDA", "stocks", 5, 5.0)
         rss.assert_called_once()
         assert out and out[0]["source"] == "rss"
+        assert not rate_limited
 
 
 @pytest.mark.unit
@@ -126,26 +133,31 @@ class TestRss429Backoff:
     def test_429_then_success_retries_once(self):
         err = HTTPError("url", 429, "Too Many Requests", {}, None)
         with patch.object(reddit, "urlopen", side_effect=[err, _atom_resp()]) as op, \
-             patch.object(reddit.time, "sleep") as slept:
-            posts = reddit._fetch_subreddit_rss("NVDA", "stocks", 5, 5.0)
+             patch.object(reddit.time, "sleep") as slept, \
+             patch.object(reddit, "_pace_reddit_request"):
+            posts, rate_limited = reddit._fetch_subreddit_rss("NVDA", "stocks", 5, 5.0)
         assert op.call_count == 2          # original + exactly one retry
-        slept.assert_called_once()         # backed off before retrying
+        slept.assert_called()              # backed off before retrying
         assert len(posts) == 2
+        assert not rate_limited
 
-    def test_429_twice_gives_up_after_one_retry(self):
+    def test_429_three_times_gives_up_after_two_retries(self):
         err = HTTPError("url", 429, "Too Many Requests", {}, None)
-        with patch.object(reddit, "urlopen", side_effect=[err, err]) as op, \
-             patch.object(reddit.time, "sleep"):
-            posts = reddit._fetch_subreddit_rss("NVDA", "stocks", 5, 5.0)
-        assert op.call_count == 2          # one retry, then gives up cleanly
+        with patch.object(reddit, "urlopen", side_effect=[err, err, err]) as op, \
+             patch.object(reddit.time, "sleep"), \
+             patch.object(reddit, "_pace_reddit_request"):
+            posts, rate_limited = reddit._fetch_subreddit_rss("NVDA", "stocks", 5, 5.0)
+        assert op.call_count == 3          # initial + two retries, then gives up
         assert posts == []
+        assert rate_limited
 
     def test_retry_after_header_is_honoured(self):
         err = HTTPError("url", 429, "Too Many Requests", {"Retry-After": "12"}, None)
         with patch.object(reddit, "urlopen", side_effect=[err, _atom_resp()]), \
-             patch.object(reddit.time, "sleep") as slept:
+             patch.object(reddit.time, "sleep") as slept, \
+             patch.object(reddit, "_pace_reddit_request"):
             reddit._fetch_subreddit_rss("NVDA", "stocks", 5, 5.0)
-        slept.assert_called_once_with(12.0)
+        slept.assert_any_call(12.0)
 
 
 @pytest.mark.unit
@@ -154,12 +166,15 @@ class TestChunkedTransferErrorsHandled:
     OSErrors, so they were previously uncaught and crashed the pipeline (#1024)."""
 
     def test_rss_incomplete_read_degrades_to_empty(self):
-        with patch.object(reddit, "urlopen", return_value=_raise(http.client.IncompleteRead(b""))):
-            assert reddit._fetch_subreddit_rss("NVDA", "stocks", 5, 5.0) == []
+        with patch.object(reddit, "urlopen", return_value=_raise(http.client.IncompleteRead(b""))), \
+             patch.object(reddit, "_pace_reddit_request"):
+            posts, rate_limited = reddit._fetch_subreddit_rss("NVDA", "stocks", 5, 5.0)
+        assert posts == []
+        assert not rate_limited
 
     def test_json_incomplete_read_falls_back_to_rss(self):
         with patch.object(reddit, "urlopen", return_value=_raise(http.client.IncompleteRead(b""))), \
-             patch.object(reddit, "_fetch_subreddit_rss", return_value=[]) as rss:
+             patch.object(reddit, "_fetch_subreddit_rss", return_value=([], False)) as rss:
             reddit._fetch_subreddit_json("NVDA", "stocks", 5, 5.0)
         rss.assert_called_once()
 
@@ -172,7 +187,7 @@ class TestFormatterHandlesRssPosts:
             "created_utc": reddit._iso_to_timestamp("2026-05-20T14:30:00Z"),
             "selftext": "great quarter", "source": "rss",
         }]
-        with patch.object(reddit, "_fetch_subreddit", return_value=rss_posts):
+        with patch.object(reddit, "_fetch_subreddit", return_value=(rss_posts, False)):
             out = reddit.fetch_reddit_posts("NVDA", subreddits=("stocks",), inter_request_delay=0)
         assert "via RSS feed" in out
         assert "↑" not in out  # no fake score arrow
@@ -185,7 +200,7 @@ class TestFormatterHandlesRssPosts:
             "created_utc": reddit._iso_to_timestamp("2026-05-20T14:30:00Z"),
             "selftext": "",
         }]
-        with patch.object(reddit, "_fetch_subreddit", return_value=json_posts):
+        with patch.object(reddit, "_fetch_subreddit", return_value=(json_posts, False)):
             out = reddit.fetch_reddit_posts("NVDA", subreddits=("stocks",), inter_request_delay=0)
         assert "1234↑" in out
         assert "56c" in out
@@ -199,9 +214,9 @@ class TestCryptoSearchTerm:
     def _captured_ticker(self, ticker):
         seen = {}
 
-        def fake_fetch(t, sub, limit, timeout):
+        def fake_fetch(t, sub, limit, timeout, *, display_ticker=None):
             seen["ticker"] = t
-            return []
+            return [], False
 
         with patch.object(reddit, "_fetch_subreddit", side_effect=fake_fetch):
             reddit.fetch_reddit_posts(ticker, subreddits=("stocks",), inter_request_delay=0)
@@ -212,3 +227,20 @@ class TestCryptoSearchTerm:
 
     def test_equity_passes_through(self):
         assert self._captured_ticker("NVDA") == "NVDA"
+
+
+@pytest.mark.unit
+class TestTickerAliases:
+    def test_nsei_uses_india_subreddits_and_search_alias(self):
+        captured = {}
+
+        def _fetch(search_query, sub, limit, timeout, *, display_ticker=None):
+            captured.setdefault("queries", []).append(search_query)
+            captured.setdefault("subs", []).append(sub)
+            return [], False
+
+        with patch.object(reddit, "_fetch_subreddit", side_effect=_fetch):
+            reddit.fetch_reddit_posts("^NSEI", inter_request_delay=0)
+
+        assert captured["queries"] == ["Nifty 50 OR NSEI OR NIFTY50"]
+        assert captured["subs"] == ["IndiaInvestments"]

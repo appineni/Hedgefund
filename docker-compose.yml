@@ -5,6 +5,9 @@ services:
       - .env
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
+      - ./reports:/home/appuser/reports
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     tty: true
     stdin_open: true
 
@@ -14,6 +17,7 @@ services:
       - ollama_data:/root/.ollama
     profiles:
       - ollama
+      - gemma
 
   tradingagents-ollama:
     build: .
@@ -24,12 +28,32 @@ services:
       - OLLAMA_BASE_URL=http://ollama:11434/v1
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
+      - ./reports:/home/appuser/reports
     depends_on:
       - ollama
     tty: true
     stdin_open: true
     profiles:
       - ollama
+
+  tradingagents-gemma:
+    build: .
+    env_file:
+      - .env
+    environment:
+      - TRADINGAGENTS_LLM_PROVIDER=ollama
+      - OLLAMA_BASE_URL=http://ollama:11434/v1
+      - TRADINGAGENTS_DEEP_THINK_LLM=gemma
+      - TRADINGAGENTS_QUICK_THINK_LLM=gemma
+    volumes:
+      - tradingagents_data:/home/appuser/.tradingagents
+      - ./reports:/home/appuser/reports
+    depends_on:
+      - ollama
+    tty: true
+    stdin_open: true
+    profiles:
+      - gemma
 
 volumes:
   tradingagents_data:
